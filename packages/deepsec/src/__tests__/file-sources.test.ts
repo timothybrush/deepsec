@@ -92,6 +92,61 @@ describe("resolveFiles()", () => {
     expect(filePaths).toEqual(["src/real.test.ts"]);
   });
 
+  it("filters generated deepsec data records from explicit file lists", () => {
+    const root = tempRepo();
+    const oldDataRoot = process.env.DEEPSEC_DATA_ROOT;
+    process.env.DEEPSEC_DATA_ROOT = path.join(root, "data{prod,dev}");
+    cleanups.push(() => {
+      if (oldDataRoot === undefined) delete process.env.DEEPSEC_DATA_ROOT;
+      else process.env.DEEPSEC_DATA_ROOT = oldDataRoot;
+    });
+
+    write(
+      root,
+      "data{prod,dev}/app/project.json",
+      JSON.stringify({
+        projectId: "app",
+        rootPath: root,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    write(root, "data{prod,dev}/app/files/src/generated.ts.json", "{}");
+    write(
+      root,
+      "data{prod,dev}/other/project.json",
+      JSON.stringify({
+        projectId: "other",
+        rootPath: root,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    write(root, "data{prod,dev}/other/files/src/generated.ts.json", "{}");
+    write(
+      root,
+      "data/legacy/project.json",
+      JSON.stringify({
+        projectId: "legacy",
+        rootPath: root,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    write(root, "data/legacy/files/src/generated.ts.json", "{}");
+    write(root, "data/users/project.json", JSON.stringify({ name: "app users" }));
+    write(root, "data/users/files/real.ts", "1\n");
+
+    const { filePaths } = resolveFiles({
+      rootPath: root,
+      files: [
+        "data{prod,dev}/app/files/src/generated.ts.json",
+        "data{prod,dev}/other/files/src/generated.ts.json",
+        "data/legacy/files/src/generated.ts.json",
+        "data/users/files/real.ts",
+      ],
+    });
+
+    expect(filePaths).toEqual(["data/users/files/real.ts"]);
+  });
+
   it("--files accepts an explicit list and drops missing entries", () => {
     const root = tempRepo();
     write(root, "real.ts", "x\n");

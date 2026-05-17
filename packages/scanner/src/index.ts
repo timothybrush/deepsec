@@ -7,13 +7,15 @@ import {
   createRunMeta,
   dataDir,
   ensureProject,
+  getDataRoot,
   getRegistry,
+  projectConfigSchema,
   readFileRecord,
   writeFileRecord,
   writeRunMeta,
 } from "@deepsec/core";
 import { glob, globSync } from "glob";
-import { minimatch } from "minimatch";
+import { escape as escapeGlob, minimatch } from "minimatch";
 import { type DetectedTech, detectTech, readTechJson, writeTechJson } from "./detect-tech.js";
 import type { MatcherRegistry } from "./matcher-registry.js";
 import { createDefaultRegistry } from "./matchers/index.js";
@@ -115,6 +117,7 @@ const _SCANNER_VERSION = "0.1.0";
 export const IGNORE_DIRS = [
   "**/node_modules/**",
   "**/.git/**",
+  "**/.deepsec/data/**",
   "**/dist/**",
   "**/build/**",
   "**/.next/**",
@@ -135,6 +138,70 @@ export const IGNORE_DIRS = [
   "**/content/docs-wip/**",
 ];
 
+function relativeInsideRoot(root: string, target: string): string | null {
+  const rel = path.relative(root, target).replaceAll("\\", "/");
+  if (!rel || rel === "." || rel.startsWith("../") || path.isAbsolute(rel)) return null;
+  return rel;
+}
+
+function appendDeepsecDataIgnoreGlobs(
+  absRoot: string,
+  dataRoot: string,
+  seenDataRoots: Set<string>,
+  globs: string[],
+): void {
+  const absDataRoot = path.resolve(dataRoot);
+  if (seenDataRoots.has(absDataRoot)) return;
+  seenDataRoots.add(absDataRoot);
+
+  const relDataRoot = relativeInsideRoot(absRoot, absDataRoot);
+  if (!relDataRoot) return;
+
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(absDataRoot, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const projectDir = path.join(absDataRoot, entry.name);
+    if (!isDeepsecProjectDir(projectDir, entry.name)) continue;
+    const relProject = escapeGlob(`${relDataRoot}/${entry.name}`, { magicalBraces: true });
+    globs.push(
+      `${relProject}/files/**`,
+      `${relProject}/runs/**`,
+      `${relProject}/reports/**`,
+      `${relProject}/project.json`,
+      `${relProject}/tech.json`,
+    );
+  }
+}
+
+function isDeepsecProjectDir(projectDir: string, projectId: string): boolean {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(projectDir, "project.json"), "utf-8"));
+    const parsed = projectConfigSchema.safeParse(raw);
+    return parsed.success && parsed.data.projectId === projectId;
+  } catch {
+    return false;
+  }
+}
+
+export function deepsecDataIgnoreGlobs(root: string): string[] {
+  const absRoot = path.resolve(root);
+  const globs: string[] = [];
+  const seenDataRoots = new Set<string>();
+
+  // Repos can contain both the active data root and root-level DeepSec mirrors.
+  // Only ignore subtrees that prove they are DeepSec projects via project.json.
+  appendDeepsecDataIgnoreGlobs(absRoot, path.resolve(getDataRoot()), seenDataRoots, globs);
+  appendDeepsecDataIgnoreGlobs(absRoot, path.join(absRoot, "data"), seenDataRoots, globs);
+
+  return globs;
+}
+
 export class RegexScannerDriver implements ScannerDriver {
   async *scan(params: {
     root: string;
@@ -145,7 +212,7 @@ export class RegexScannerDriver implements ScannerDriver {
     ignorePaths?: string[];
   }): AsyncGenerator<ScanProgress, FileRecord[]> {
     const { root, matchers, projectId, runId } = params;
-    const ignore = [...IGNORE_DIRS, ...(params.ignorePaths ?? [])];
+    const ignore = [...IGNORE_DIRS, ...deepsecDataIgnoreGlobs(root), ...(params.ignorePaths ?? [])];
     const upserted = new Map<string, FileRecord>();
 
     // Pre-glob: deduplicate file patterns across matchers
@@ -458,6 +525,8 @@ export async function scan(params: {
   const ignore = [
     "**/node_modules/**",
     "**/.git/**",
+    "**/.deepsec/data/**",
+    ...deepsecDataIgnoreGlobs(params.root),
     "**/dist/**",
     "**/build/**",
     "**/.next/**",
